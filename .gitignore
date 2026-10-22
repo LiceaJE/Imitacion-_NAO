@@ -1,0 +1,6 @@
+venv/
+__pycache__/
+buffer_images/
+buffer_angles/
+buffer_permanent/
+*.npy

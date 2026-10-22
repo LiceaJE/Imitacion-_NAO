@@ -1,142 +1,91 @@
-# From Python
-# It requires OpenCV installed for Python
-import sys
-import cv2
-import os
-from sys import platform
-import argparse
-import numpy as np
 import math
 import time
+import cv2
 import numpy as np
-path_python_release = "C:/Program Files/openpose/build/python/openpose/Release"
-path_64_release = "C:/Program Files/openpose/build/x64/Release"
-path_bin = "C:/Program Files/openpose/build/bin"
-path_images = "C:/Program Files/openpose/examples/media"
-path_models = "C:/Program Files/openpose/models"
+import mediapipe as mp
 
-#edges = {(1,2), (2,3), (3,4), (1,5), (5,6), (6,7)}
-#2, 3, 5, 6
+MIRROR_MODE = True      # True: tu brazo derecho -> brazo izquierdo del NAO (como espejo)
+FLIP_DEPTH = False      # Pon True si adelante/atras salen invertidos
+MIN_VISIBILITY = 0.5    # Debajo de esto se ignora el brazo
+SMOOTHING = 0.5         # 0 = sin suavizar, 0.8 = muy suave pero con mas retraso
 
+_mp_pose = mp.solutions.pose
+_L = _mp_pose.PoseLandmark
+_pose = _mp_pose.Pose(model_complexity=0, smooth_landmarks=True,
+                      min_detection_confidence=0.5, min_tracking_confidence=0.5)
 
+ARM_POINTS = {"right": (_L.RIGHT_SHOULDER, _L.RIGHT_ELBOW, _L.RIGHT_WRIST),
+              "left":  (_L.LEFT_SHOULDER,  _L.LEFT_ELBOW,  _L.LEFT_WRIST)}
+OUT_SIGN = {"right": -1.0, "left": 1.0}  # hacia afuera del cuerpo en el eje x de la imagen
 
-def get_angle(edge1,  edge2, points):
-    #assert tuple(sorted(edge1)) in edges
-    #assert tuple(sorted(edge2)) in edges
-    #print(points[edge1[0]-1], points[edge1[1]-1])
-    #print(points[edge2[0]-1], points[edge2[1]-1])
-    edge1set = set(edge1)
-    edge2set = set(edge2)
-    mid_point = edge1set.intersection(edge2set).pop()
-    a = (edge1set-edge2set).pop()
-    b = (edge2set-edge1set).pop()
-    v1 = points[mid_point-1]-points[a-1]
-    v2 = points[mid_point-1]-points[b-1]
-    #print(v1, v2)
-
-    angle = (math.degrees(np.arccos(np.dot(v1,v2)
-                                    /(np.linalg.norm(v1)*np.linalg.norm(v2)))))
-
-    p1 = points[np.delete(np.asarray(edge2), np.where(np.asarray(edge2) == mid_point))-1][0][1]
-    p0 = points[mid_point-1][1]
-    if p1 > p0:
-        angle = 360 - angle
-    #
-    #print(angle)
-    return angle
+_last_pitch = {"left": 0.0, "right": 0.0}
+_smoothed = [float("nan")] * 6
 
 
+def _unit(v):
+    n = np.linalg.norm(v)
+    return v / n if n > 1e-6 else None
 
 
+def _arm_to_nao(world, person_side):
+    pts = [world[i] for i in ARM_POINTS[person_side]]
+    if any(p.visibility < MIN_VISIBILITY for p in pts):
+        return None
+    sh, el, wr = pts
 
-try:
-    # Windows Import
-    sys.path.append(path_python_release);
-    os.environ['PATH'] = os.environ['PATH'] + ';' + path_64_release + ";" + path_bin + ";"
-    import pyopenpose as op
-except ImportError as e:
-    print('Error: OpenPose library could not be found. Did you enable `BUILD_PYTHON` in CMake and have this Python script in the right folder?')
-    raise e
+    def body(a, b):
+        d = np.array([b.x - a.x, b.y - a.y, b.z - a.z])
+        fwd = d[2] if FLIP_DEPTH else -d[2]
+        return np.array([fwd, OUT_SIGN[person_side] * d[0], -d[1]])  # adelante, afuera, arriba
 
-# Starting OpenPose
+    upper = _unit(body(sh, el))
+    fore = _unit(body(el, wr))
+    if upper is None or fore is None:
+        return None
 
-#hoeveel nogig als je opnieuw runned? Eerste try-catch nodig?d
-def img_to_angle(img, opWrapper, file_index, log_time_start, log_opcomp, log_convangle):
+    nao_side = "left" if (person_side == "right") == MIRROR_MODE else "right"
+    fwd, out, up = upper
+    uy = out if nao_side == "left" else -out
 
-    # Process Image
-    datum = op.Datum()
-    datum.cvInputData = img
-    opWrapper.emplaceAndPop(op.VectorDatum([datum]))
-    pose = datum.poseKeypoints
-    
-    # Add an item to the openpose computation log
-    log_opcomp.append( (file_index, log_time_start, time.time(), pose) )
-      
-    # Mark the start time of a subsequent section of code
-    log_time_start = time.time()
-    
-    #print()
-    #print(pose)
-    if not isinstance(pose, type(None)):
-        points = pose[0, 1:8, :2]
-        angles_2 = get_angle((1, 2), (2, 3), points)
-        angles_3 = get_angle((2, 3), (3, 4), points)
-        angles_5 = get_angle((1, 5), (5, 6), points)
-        angles_6 = get_angle((5, 6), (6, 7), points)
-        angles = [angles_2, angles_3, angles_5, angles_6]
+    roll = math.asin(max(-1.0, min(1.0, uy)))
+    if math.cos(roll) > 0.35:
+        pitch = math.atan2(-up, fwd)
+        _last_pitch[nao_side] = pitch
     else:
-        angles = [0, 0, 0, 0]
-        
-    # Add an item to the pose-to-angle conversion log
-    log_convangle.append( (file_index, log_time_start, time.time(), angles) )
-    
+        # Brazo casi en T: el pitch es inestable, se mantiene el ultimo valido
+        pitch = _last_pitch[nao_side]
+
+    bend = math.acos(max(-1.0, min(1.0, float(np.dot(upper, fore)))))
+    elbow = -bend if nao_side == "left" else bend
+    return nao_side, (pitch, roll, elbow)
+
+
+def analyze(img):
+    """Devuelve (resultado_mediapipe, [Lpitch, Lroll, Lcodo, Rpitch, Rroll, Rcodo]) en radianes.
+    Los brazos que no se ven salen como nan."""
+    res = _pose.process(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+    raw = [float("nan")] * 6
+    if res.pose_world_landmarks is not None:
+        world = res.pose_world_landmarks.landmark
+        for person_side in ("right", "left"):
+            out = _arm_to_nao(world, person_side)
+            if out:
+                nao_side, vals = out
+                base = 0 if nao_side == "left" else 3
+                raw[base:base + 3] = list(vals)
+    for i, v in enumerate(raw):
+        if math.isnan(v):
+            _smoothed[i] = float("nan")
+        elif math.isnan(_smoothed[i]):
+            _smoothed[i] = v
+        else:
+            _smoothed[i] = SMOOTHING * _smoothed[i] + (1 - SMOOTHING) * v
+    return res, list(_smoothed)
+
+
+def img_to_angle(img, opWrapper, file_index, log_time_start, log_opcomp, log_convangle):
+    res, angles = analyze(img)
+    t = time.time()
+    log_opcomp.append((file_index, log_time_start, t, None))
+    log_convangle.append((file_index, t, t, angles))
     return angles
-
-# params = dict()
-# params["model_folder"] = path_models
-# #hoeveel nogig als je opnieuw runned? Eerste try-catch nodig?d
-# def img_to_angle(img, file_index, log_time_start, log_opcomp, log_convangle):
-#         opWrapper = op.WrapperPython()
-#         opWrapper.configure(params)
-#         opWrapper.start()
-#
-#         # Process Image
-#         datum = op.Datum()
-#         datum.cvInputData = img
-#         opWrapper.emplaceAndPop(op.VectorDatum([datum]))
-#         pose = datum.poseKeypoints
-#
-#         # Add an item to the openpose computation log
-#         log_opcomp.append( (file_index, log_time_start, time.time(), pose) )
-#
-#         # Mark the start time of a subsequent section of code
-#         log_time_start = time.time()
-#
-#         #print()
-#         #print(pose)
-#         if not isinstance(pose, type(None)):
-#             points = pose[0, 1:8, :2]
-#             angles_2 = get_angle((1, 2), (2, 3), points)
-#             angles_3 = get_angle((2, 3), (3, 4), points)
-#             angles_5 = get_angle((1, 5), (5, 6), points)
-#             angles_6 = get_angle((5, 6), (6, 7), points)
-#             angles = [angles_2, angles_3, angles_5, angles_6]
-#         else:
-#             angles = [0, 0, 0, 0]
-#
-#         # Add an item to the pose-to-angle conversion log
-#         log_convangle.append( (file_index, log_time_start, time.time(), angles) )
-#
-#         return angles
-
-# points = np.array([[0, 0],[1, 0], [0, 1], [1, 1], [-1, 0], [0, -1], [-1, -1], [-1, 1], [1, -1]])
-#
-#
-#
-# angles_2 = get_angle((1, 2), (2, 4), points)
-# angles_2 = get_angle((1, 2), (2, 9), points)
-# angles_3 = get_angle((1, 5), (5, 8), points)
-# angles_3 = get_angle((1, 5), (5, 7), points)
-
-
-

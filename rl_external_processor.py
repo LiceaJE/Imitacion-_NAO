@@ -23,23 +23,6 @@ Create new buffer folders on the nao and on Tommie's laptop (and remove the old 
 Make sure we have the right robot (with the right password and directories)
 """
 
-
-path_python_release = "C:/Program Files/openpose/build/python/openpose/Release"
-path_64_release = "C:/Program Files/openpose/build/x64/Release"
-path_bin = "C:/Program Files/openpose/build/bin"
-path_images = "C:/Program Files/openpose/examples/media"
-path_models = "C:/Program Files/openpose/models"
-
-try:
-    # Windows Import
-    sys.path.append(path_python_release);
-    os.environ['PATH'] = os.environ['PATH'] + ';' + path_64_release + ";" + path_bin + ";"
-    import pyopenpose as op
-except ImportError as e:
-    print('Error: OpenPose library could not be found. Did you enable `BUILD_PYTHON` in CMake and have this Python script in the right folder?')
-    raise e
-
-
 def dump(path, l):
     with open(path, "wb") as f:
         pickle.dump(l, f)
@@ -54,9 +37,9 @@ class ExternalProcessor():
         
         self.port = 22
         if is_nao:
-            self.ip        = "169.254.121.20" # Tends to change
+            self.ip        = "192.168.0.100" # Tends to change
             self.username  = "nao"
-            self.password  = "HRI2021/"
+            self.password  = "nao"
             self.path_main_ext = "/home/nao/imitate/"
         else:
             self.ip        = "192.168.1.50"
@@ -69,7 +52,7 @@ class ExternalProcessor():
         self.fnt_angles = "angles_{:06d}.npy" # The file name template for angles
         
         #self.path_main_int   = "D:/University/Master/Human-Robot Interaction/Project/ssh_tests/"
-        self.path_main_int = "C:/Users/tommi/Documents/Courses_2021/Human Robot Interaction/Project/ssh_code/"
+        self.path_main_int = "/home/lisexxx/nao_mediapipe/nao_imitate/"
         self.path_buffer_images_int = self.path_main_int+"buffer_images/"
         self.path_buffer_angles_int = self.path_main_int+"buffer_angles/"
         
@@ -207,12 +190,7 @@ class ExternalProcessor():
         log_angsend = []   # (index, log_time_start, log_time_end, angles); index is derived from the file name
         try:
             
-            
-            params = dict()
-            params["model_folder"] = path_models
-            opWrapper = op.WrapperPython()
-            opWrapper.configure(params)
-            opWrapper.start()
+            opWrapper = None
             
             filename_previous = ""
             while True:
